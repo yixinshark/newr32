@@ -19,6 +19,15 @@ Handler32data::Handler32data(QObject *parent)
             {CMD_READ_PARAM2_06, &Handler32data::readOperateData},
             {CMD_READ_1000PPM_07, &Handler32data::readOperateData},
             {CMD_READ_5000PPM_08, &Handler32data::readOperateData},
+            {CMD_READ_TEMP_HUM_21, &Handler32data::readTemperatureHumidity},
+            {CMD_READ_ADC_22, &Handler32data::readGasProbeADC},
+            {CMD_READ_RESISTANCE_23, &Handler32data::readGasProbeResistance},
+            {CMD_READ_COMPENSATION_RESISTANCE_24, &Handler32data::readGasProbeResistance},
+            {CMD_READ_GAS_CONCENTRATION_25, &Handler32data::readGasConcentration},
+            {CMD_READ_FIRMWARE_VERSION_41, &Handler32data::readFirmwareVersion},
+            {CMD_OPEN_CLOSE_PRINT_42, &Handler32data::readOperateResult},
+            {CMD_QUERY_FAULT_STATUS_43, &Handler32data::readProductFaultStatus},
+            {CMD_SET_ALARM_THRESHOLD_44, &Handler32data::readOperateResult},
     };
 
 }
@@ -158,6 +167,48 @@ bool Handler32data::readOperateResult(quint8 cmd, const QByteArray &data, QVaria
         }
     };
 
+    // 打开或者关闭周期性打印数据
+    auto readPrintDataAck = [](const QByteArray &data, QVariantMap &value) {
+        quint8 result = static_cast<quint8>(data.at(2));
+        value.insert(ACK_RESULT, result == 0 ? "成功" : "失败");
+        if (result != 0) {
+            quint8 error = static_cast<quint8>(data.at(3));
+            switch (error) {
+                case 0:
+                    value.insert(ACK_ERROR, "无错误");
+                    break;
+                case 1:
+                    value.insert(ACK_ERROR, "数据超范围");
+                    break;
+                default:
+                    value.insert(ACK_ERROR, "未知错误");
+                    break;
+            }
+        }
+    };
+
+    // 设置报警阈值设置报警阈值
+    auto readAlarmThresholdAck = [](const QByteArray &data, QVariantMap &value) {
+        quint8 result = static_cast<quint8>(data.at(2));
+        value.insert(ACK_RESULT, result == 0 ? "成功" : "失败");
+        if (result != 0) {
+            quint8 error = static_cast<quint8>(data.at(3));
+            switch (error) {
+                case 0:
+                    value.insert(ACK_ERROR, "无错误");
+                    break;
+                case 1:
+                    value.insert(ACK_ERROR, "报警阈值超范围");
+                    break;
+                case 2:
+                    value.insert(ACK_ERROR, "写flash失败");
+                    break;
+                default:
+                    value.insert(ACK_ERROR, "未知错误");
+                    break;
+            }
+        }
+    };
 
     switch (cmd) {
         case CMD_ND_01:
@@ -169,6 +220,13 @@ bool Handler32data::readOperateResult(quint8 cmd, const QByteArray &data, QVaria
         case CMD_ND_STATUS_03:
             readCalibrationStatusAck(data, value);
             break;
+        case CMD_OPEN_CLOSE_PRINT_42:
+            readPrintDataAck(data, value);
+            break;
+        case CMD_SET_ALARM_THRESHOLD_44:
+            readAlarmThresholdAck(data, value);
+            break;
+
         default:
             qWarning() << "cmd:" << cmd << "not support:" << data.toHex();
             return false;
@@ -207,6 +265,136 @@ bool Handler32data::readOperateData(quint8 cmd, const QByteArray &data, QVariant
             qWarning() << "cmd:" << cmd << "not support:" << data.toHex();
             return false;
     }
+
+    return true;
+}
+
+bool Handler32data::readTemperatureHumidity(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 两字节的温度，两字节的湿度
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    // 读取温度
+    qint16 temperature = 0;
+    memcpy(&temperature, data.data(), 2);
+    value.insert(ACK_TEMPERATURE, temperature / 10.0);
+
+    // 读取湿度
+    qint16 humidity = 0;
+    memcpy(&humidity, data.data() + 2, 2);
+    value.insert(ACK_HUMIDITY, humidity / 10.0);
+
+    return true;
+}
+
+bool Handler32data::readGasProbeADC(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 共4字节，前两个字节代表ADC值
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    // 读取ADC值
+    quint16 adc = 0;
+    memcpy(&adc, data.data(), 2);
+    value.insert(ACK_ADC_VALUE, adc);
+
+    return true;
+}
+
+bool Handler32data::readGasProbeResistance(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 单位为K欧姆，数据类型为float，将4字节组合在一起
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    // 读取电阻值
+    float resistance = 0;
+    memcpy(&resistance, data.data(), 4);
+
+    if (cmd == CMD_READ_RESISTANCE_23) {
+        value.insert(ACK_RESISTANCE_VALUE, resistance);
+    } else if (cmd == CMD_READ_COMPENSATION_RESISTANCE_24) {
+        value.insert(ACK_COMPENSATION_RESISTANCE_VALUE, resistance);
+    }
+
+    return true;
+}
+
+bool Handler32data::readGasConcentration(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 4个字节，前两个为气体浓度，第三个为报警状态
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    // 读取浓度值
+    quint16 concentration = 0;
+    memcpy(&concentration, data.data(), 2);
+    value.insert(ACK_GAS_CONCENTRATION, concentration);
+
+    // 读取报警状态 TODO 缺少状态解释
+    quint8 alarm = static_cast<quint8>(data.at(2));
+    //    switch (alarm) {
+    //        case 0:
+    //            value.insert(ACK_ALARM_STATUS, "正常");
+    //            break;
+    //        case 1:
+    //            value.insert(ACK_ALARM_STATUS, "报警");
+    //            break;
+    //        default:
+    //            value.insert(ACK_ALARM_STATUS, "未知");
+    //            break;
+    //    }
+
+    value.insert(ACK_ALARM_STATUS, alarm);
+
+    return true;
+}
+
+bool Handler32data::readFirmwareVersion(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 4个字节，第一个字节为主版本号，第二个字节为副版本号
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    // 读取主版本号和副版本号，组成版本号
+    quint8 mainVersion = static_cast<quint8>(data.at(0));
+    quint8 subVersion = static_cast<quint8>(data.at(1));
+    QString version = QString("%1.%2").arg(mainVersion).arg(subVersion);
+    value.insert(ACK_FIRMWARE_VERSION, version);
+
+    return true;
+}
+
+bool Handler32data::readProductFaultStatus(quint8 cmd, const QByteArray &data, QVariantMap &value)
+{
+    // 4个字节，第一个字节故障码
+    if (data.length() != 4) {
+        qWarning() << "cmd:" << cmd << "data length is not 4:" << data.toHex();
+        return false;
+    }
+
+    quint8 fault = static_cast<quint8>(data.at(0));
+    if (fault & (1 << 0))
+        value.insert(ACK_ERROR, "内部错误 - 测量结果错误，比如：内部芯片通信故障");
+    if (fault & (1 << 1))
+        value.insert(ACK_ERROR, "数据超范围 - 传感器检测到的温湿度，气体浓度超范围了");
+    if (fault & (1 << 3))
+        value.insert(ACK_ERROR, "自检错误 - 设置错误等");
+    if (fault & (1 << 4))
+        value.insert(ACK_ERROR, "永久性损坏 - 任何无法恢复的传感器错误，需要更换传感器");
+    if (fault & (1 << 5))
+        value.insert(ACK_ERROR, "总运行时间超范围 - 生命达到了极限");
 
     return true;
 }
