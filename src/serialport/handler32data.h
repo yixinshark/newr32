@@ -16,12 +16,29 @@ public:
     explicit Handler32data(QObject *parent = nullptr);
     ~Handler32data() override;
 
+    void setSlaveAddress(char slaveAddress);
+    QByteArray getSendData(char cmd, const QVariantMap &info);
+
 signals:
-    void frameReceived(quint8 cmd, const QVariantMap &info);
+    void frameReceived(char cmd, const QVariantMap &info);
     void recvedFrameData(const QByteArray &frameData);
 
 public slots:
     void processReceivedData(const QByteArray &data);
+
+private:
+    // 填充发送内容
+    void addContent(char cmd, const QVariantMap &info, QByteArray &data);
+    void addCheckSum(QByteArray &data);
+
+    // 添加浓度标定命令的数据
+    bool addCmd_nd_Content(const QVariantMap &info, QByteArray &data);
+    // 打开或者关闭周期性打印数据
+    bool addCmd_enable_print_Content(const QVariantMap &info, QByteArray &data);
+    // 设置报警阈值
+    bool addCmd_set_alarm_threshold_Content(const QVariantMap &info, QByteArray &data);
+    // 设置模块地址
+    bool addCmd_set_address_Content(const QVariantMap &info, QByteArray &data);
 
 private:
     // 帧数据是否有效
@@ -49,6 +66,13 @@ private:
 
     typedef bool (Handler32data::*readFunc)(quint8 cmd, const QByteArray &data, QVariantMap &value);
     QMap<quint8 , readFunc> m_readFuncMap;
+
+private:
+    char m_address = 0x00;
+    // 设置模块的地址的命令号:0x01
+    bool m_isSetAddress = false;
+    // 读取模块的地址的命令号:0x02
+    bool m_isReadAddress = false;
 };
 
 

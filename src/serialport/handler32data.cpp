@@ -6,13 +6,14 @@
 #include "r32constant.h"
 
 #include <QDebug>
+#include <QByteArray>
 
 Handler32data::Handler32data(QObject *parent)
     : QObject(parent)
 {
     m_readFuncMap = {
-            {CMD_ND_01, &Handler32data::readOperateResult},
-            {CMD_ND_OVER_02, &Handler32data::readOperateResult},
+            {CMD_01, &Handler32data::readOperateResult},
+            {CMD_02, &Handler32data::readOperateResult},
             {CMD_ND_STATUS_03, &Handler32data::readOperateResult},
             {CMD_READ_R0_04, &Handler32data::readOperateData},
             {CMD_READ_PARAM1_05, &Handler32data::readOperateData},
@@ -210,12 +211,51 @@ bool Handler32data::readOperateResult(quint8 cmd, const QByteArray &data, QVaria
         }
     };
 
+    // 设置模块地址
+    auto readSetAddressAck = [](const QByteArray &data, QVariantMap &value) {
+        value.insert(MODULE_ADDRESS, true);
+        quint8 result = static_cast<quint8>(data.at(2));
+        value.insert(ACK_RESULT, result == 0 ? "成功" : "失败");
+        if (result != 0) {
+            quint8 error = static_cast<quint8>(data.at(3));
+            switch (error) {
+                case 0:
+                    value.insert(ACK_ERROR, "无错误");
+                    break;
+                case 1:
+                    value.insert(ACK_ERROR, "地址超范围");
+                    break;
+                case 2:
+                    value.insert(ACK_ERROR, "写flash失败");
+                    break;
+                default:
+                    value.insert(ACK_ERROR, "未知错误");
+                    break;
+            }
+        }
+    };
+
+    // 读取模块地址
+    auto readAddressAck = [](const QByteArray &data, QVariantMap &value) {
+        value.insert(MODULE_ADDRESS, true);
+        quint8 address = static_cast<quint8>(data.at(2));
+        value.insert(READ_MODULE_ADDRESS, address);
+    };
+
     switch (cmd) {
-        case CMD_ND_01:
-            readNdAck(data, value);
+        case CMD_01:
+            if (m_isSetAddress) {
+                readSetAddressAck(data, value);
+            } else {
+                readNdAck(data, value);
+            }
             break;
-        case CMD_ND_OVER_02:
-            readCalibrationAck(data, value);
+        case CMD_02:
+            if (m_isReadAddress) {
+                readAddressAck(data, value);
+            } else {
+                readCalibrationAck(data, value);
+            }
             break;
         case CMD_ND_STATUS_03:
             readCalibrationStatusAck(data, value);
@@ -340,19 +380,19 @@ bool Handler32data::readGasConcentration(quint8 cmd, const QByteArray &data, QVa
     memcpy(&concentration, data.data(), 2);
     value.insert(ACK_GAS_CONCENTRATION, concentration);
 
-    // 读取报警状态 TODO 缺少状态解释
+    // 读取报警状态
     quint8 alarm = static_cast<quint8>(data.at(2));
-    //    switch (alarm) {
-    //        case 0:
-    //            value.insert(ACK_ALARM_STATUS, "正常");
-    //            break;
-    //        case 1:
-    //            value.insert(ACK_ALARM_STATUS, "报警");
-    //            break;
-    //        default:
-    //            value.insert(ACK_ALARM_STATUS, "未知");
-    //            break;
-    //    }
+        switch (alarm) {
+            case 0:
+                value.insert(ACK_ALARM_STATUS, "气体浓度正常");
+                break;
+            case 1:
+                value.insert(ACK_ALARM_STATUS, "气体浓度超出报警阈值");
+                break;
+            default:
+                value.insert(ACK_ALARM_STATUS, "未知");
+                break;
+        }
 
     value.insert(ACK_ALARM_STATUS, alarm);
 
@@ -395,6 +435,143 @@ bool Handler32data::readProductFaultStatus(quint8 cmd, const QByteArray &data, Q
         value.insert(ACK_ERROR, "永久性损坏 - 任何无法恢复的传感器错误，需要更换传感器");
     if (fault & (1 << 5))
         value.insert(ACK_ERROR, "总运行时间超范围 - 生命达到了极限");
+
+    return true;
+}
+
+void Handler32data::setSlaveAddress(char slaveAddress)
+{
+    m_address = slaveAddress;
+}
+
+QByteArray Handler32data::getSendData(char cmd, const QVariantMap &info)
+{
+    QByteArray data;
+    addContent(cmd, info, data);
+
+    return data;
+}
+
+void Handler32data::addContent(char cmd, const QVariantMap &info, QByteArray &data)
+{
+    // 添加4字节 0x00
+    auto addFourNoneByte = [&data](){
+        char noneByte = 0x00;
+        data.append(noneByte);
+        data.append(noneByte);
+        data.append(noneByte);
+        data.append(noneByte);
+    };
+
+    data.append(SEND_HEADER);
+    data.append(m_address);
+    data.append(cmd);
+    switch (cmd) {
+        case CMD_01: {
+            bool isSetAddress = info.value(MODULE_ADDRESS, false).toBool();
+            if (!isSetAddress) {
+                if (!addCmd_nd_Content(info, data))
+                    return;
+            } else {
+                if (!addCmd_set_address_Content(info, data))
+                    return;
+            }
+            break;
+        }
+        case CMD_02: {
+            bool isReadAddress = info.value(MODULE_ADDRESS, false).toBool();
+            if (!isReadAddress) {
+                addFourNoneByte();
+                m_isReadAddress = false;
+            } else {
+               data[1] = 0x00;
+               m_isReadAddress = true;
+            }
+            break;
+        }
+        case CMD_OPEN_CLOSE_PRINT_42:
+            if (!addCmd_enable_print_Content(info, data))
+                return;
+            break;
+        case CMD_SET_ALARM_THRESHOLD_44:
+            if (!addCmd_set_alarm_threshold_Content(info, data))
+                return;
+            break;
+        default:
+            addFourNoneByte();
+            break;
+    }
+
+    addCheckSum(data);
+}
+
+void Handler32data::addCheckSum(QByteArray &data)
+{
+    quint16 checksum = 0;
+    for (int i = 0; i < data.length(); ++i)
+        checksum += static_cast<quint8>(data.at(i));
+
+    // 只要低8位
+    data.append(static_cast<char>(checksum & 0xFF));
+}
+
+bool Handler32data::addCmd_nd_Content(const QVariantMap &info, QByteArray &data)
+{
+    if (!info.contains(SEND_CAL_POINT) || !info.contains(SEND_CAL_CONCENTRATION)) {
+        qWarning() << "cmd:" << CMD_01 << "info not contains cal point or cal concentration";
+        return false;
+    }
+
+    m_isSetAddress = false;
+    quint8 calPoint = static_cast<quint8>(info.value(SEND_CAL_POINT).toUInt());
+    quint16 calConcentration = static_cast<quint16>(info.value(SEND_CAL_CONCENTRATION).toUInt());
+    qInfo() << "calPoint:" << calPoint << "calConcentration:" << calConcentration;
+
+    data.append(calPoint);
+    data.append(static_cast<char>(calConcentration >> 8));
+    data.append(static_cast<char>(calConcentration & 0xFF));
+
+    return true;
+}
+
+bool Handler32data::addCmd_enable_print_Content(const QVariantMap &info, QByteArray &data)
+{
+    if (!info.contains(SEND_PRINT_ENABLE)) {
+        qWarning() << "cmd:" << CMD_OPEN_CLOSE_PRINT_42 << "info not contains print content";
+        return false;
+    }
+
+    data.append(static_cast<char>(info.value(SEND_PRINT_ENABLE).toUInt()));
+
+    return true;
+}
+
+bool Handler32data::addCmd_set_alarm_threshold_Content(const QVariantMap &info, QByteArray &data)
+{
+    if (!info.contains(SEND_ALARM_THRESHOLD)) {
+        qWarning() << "cmd:" << CMD_SET_ALARM_THRESHOLD_44 << "info not contains alarm enable or alarm concentration";
+        return false;
+    }
+
+    quint16 alarmThreshold = static_cast<quint16>(info.value(SEND_ALARM_THRESHOLD).toUInt());
+
+    data.append(static_cast<char>(alarmThreshold >> 8));
+    data.append(static_cast<char>(alarmThreshold & 0xFF));
+
+    return true;
+}
+
+bool Handler32data::addCmd_set_address_Content(const QVariantMap &info, QByteArray &data)
+{
+    if (!info.contains(SET_MODULE_ADDRESS)) {
+        qWarning() << "cmd:" << CMD_01 << "info not contains module address";
+        return false;
+    }
+
+    m_isSetAddress = true;
+    // 修改i地址字节，添加设置地址数据
+    data[1] = 0x00;
+    data.append(static_cast<char>(info.value(SET_MODULE_ADDRESS).toUInt()));
 
     return true;
 }
