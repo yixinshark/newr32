@@ -508,8 +508,8 @@ void Handler32data::addContent(char cmd, const QVariantMap &info, QByteArray &da
 void Handler32data::addCheckSum(QByteArray &data)
 {
     quint16 checksum = 0;
-    for (int i = 0; i < data.length(); ++i)
-        checksum += static_cast<quint8>(data.at(i));
+    for (char i : data)
+        checksum += static_cast<quint8>(i);
 
     // 只要低8位
     data.append(static_cast<char>(checksum & 0xFF));
